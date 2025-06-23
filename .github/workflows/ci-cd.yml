@@ -224,14 +224,18 @@ jobs:
         total_complexity=0
         file_count=0
         
-        find . -name "*.cs" -not -path "./bin/*" -not -path "./obj/*" -not -path "./TestResults/*" | sort | while read file; do
+        # Use a different approach to avoid subshell variable issues
+        temp_file=$(mktemp)
+        find . -name "*.cs" -not -path "./bin/*" -not -path "./obj/*" -not -path "./TestResults/*" | sort > "$temp_file"
+        
+        while IFS= read -r file; do
           if [ -f "$file" ]; then
             lines=$(wc -l < "$file" 2>/dev/null || echo 0)
             classes=$(grep -c "class " "$file" 2>/dev/null || echo 0)
             methods=$(grep -c "public.*(" "$file" 2>/dev/null || echo 0)
             
             # Simple complexity calculation (if statements, loops, etc.)
-            complexity=$(($(grep -c "if\|for\|while\|switch\|catch" "$file" 2>/dev/null || echo 0) + $methods))
+            complexity=$(($(grep -c "if\|for\|while\|switch\|catch" "$file" 2>/dev/null || echo 0) + methods))
             
             echo "| $(basename "$file") | $lines | $classes | $methods | $complexity |" >> $GITHUB_STEP_SUMMARY
             
@@ -241,10 +245,12 @@ jobs:
             total_complexity=$((total_complexity + complexity))
             file_count=$((file_count + 1))
           fi
-        done
+        done < "$temp_file"
         
-        # Calculate averages
-        if [ $file_count -gt 0 ]; then
+        rm -f "$temp_file"
+        
+        # Calculate averages safely
+        if [ "$file_count" -gt 0 ]; then
           avg_lines=$((total_lines / file_count))
           avg_complexity=$((total_complexity / file_count))
         else
@@ -267,24 +273,24 @@ jobs:
         # Quality scores
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### Quality Indicators" >> $GITHUB_STEP_SUMMARY
-        if [ $avg_lines -lt 200 ]; then
+        if [ "$avg_lines" -lt 200 ]; then
           echo "✅ **File Size**: Good (avg $avg_lines lines per file)" >> $GITHUB_STEP_SUMMARY
-        elif [ $avg_lines -lt 300 ]; then
+        elif [ "$avg_lines" -lt 300 ]; then
           echo "⚠️ **File Size**: Moderate (avg $avg_lines lines per file)" >> $GITHUB_STEP_SUMMARY
         else
           echo "❌ **File Size**: High (avg $avg_lines lines per file - consider refactoring)" >> $GITHUB_STEP_SUMMARY
         fi
         
-        if [ $avg_complexity -lt 10 ]; then
+        if [ "$avg_complexity" -lt 10 ]; then
           echo "✅ **Complexity**: Low (good maintainability)" >> $GITHUB_STEP_SUMMARY
-        elif [ $avg_complexity -lt 20 ]; then
+        elif [ "$avg_complexity" -lt 20 ]; then
           echo "⚠️ **Complexity**: Moderate (acceptable)" >> $GITHUB_STEP_SUMMARY
         else
           echo "❌ **Complexity**: High (consider simplification)" >> $GITHUB_STEP_SUMMARY
         fi
         
-        # Generate HTML report
-        cat > code-metrics.html << 'EOF'
+        # Generate HTML report with actual data
+        cat > code-metrics.html << EOF
         <!DOCTYPE html>
         <html>
         <head>
@@ -302,16 +308,18 @@ jobs:
         </head>
         <body>
             <h1>Code Metrics Dashboard</h1>
+            <div class='metric-card good'>
+                <h3>Project Overview</h3>
+                <p>Total Files: $file_count</p>
+                <p>Total Lines: $total_lines</p>
+                <p>Total Classes: $total_classes</p>
+                <p>Total Methods: $total_methods</p>
+                <p>Average Lines per File: $avg_lines</p>
+                <p>Average Complexity per File: $avg_complexity</p>
+            </div>
+        </body>
+        </html>
         EOF
-        
-        # Add metrics to HTML
-        echo "<div class='metric-card good'><h3>Project Overview</h3>" >> code-metrics.html
-        echo "<p>Total Files: $file_count</p>" >> code-metrics.html
-        echo "<p>Total Lines: $total_lines</p>" >> code-metrics.html
-        echo "<p>Total Classes: $total_classes</p>" >> code-metrics.html
-        echo "<p>Total Methods: $total_methods</p>" >> code-metrics.html
-        echo "</div>" >> code-metrics.html
-        echo "</body></html>" >> code-metrics.html
         
     - name: Generate maintainability report
       run: |
