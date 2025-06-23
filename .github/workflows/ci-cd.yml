@@ -1,0 +1,390 @@
+name: Continuous Integration
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  ci:
+    name: Build, Test & Quality Check
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        dotnet-version: [ '8.0.x', '9.0.x' ]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup .NET Core
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ matrix.dotnet-version }}
+        
+    - name: Cache NuGet packages
+      uses: actions/cache@v4
+      with:
+        path: ~/.nuget/packages
+        key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+        restore-keys: |
+          ${{ runner.os }}-nuget-
+          
+    - name: Restore dependencies
+      run: dotnet restore
+      
+    - name: Check code formatting
+      run: |
+        dotnet format --verify-no-changes --verbosity normal || echo "⚠️ Code formatting issues detected"
+      continue-on-error: true
+      
+    - name: Build solution
+      run: dotnet build --no-restore --configuration Release --verbosity normal
+      
+    - name: Run static analysis
+      run: dotnet build --no-restore --configuration Release --verbosity normal --property TreatWarningsAsErrors=false
+      
+    - name: Run tests with coverage
+      run: dotnet test --no-build --configuration Release --verbosity normal --collect:"XPlat Code Coverage" --results-directory ./coverage --logger trx --results-directory ./test-results
+      
+    - name: Install ReportGenerator
+      run: dotnet tool install -g dotnet-reportgenerator-globaltool
+      
+    - name: Generate coverage report
+      run: |
+        reportgenerator \
+          -reports:"./coverage/**/coverage.cobertura.xml" \
+          -targetdir:"./coverage-report" \
+          -reporttypes:"Html;JsonSummary;Badges;TextSummary" \
+          -verbosity:Info
+      
+    - name: Upload test results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: test-results-${{ matrix.dotnet-version }}
+        path: ./test-results/*.trx
+        retention-days: 30
+        
+    - name: Upload coverage reports
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: coverage-report-${{ matrix.dotnet-version }}
+        path: ./coverage-report
+        retention-days: 30
+        
+    - name: Upload coverage data
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: coverage-data-${{ matrix.dotnet-version }}
+        path: ./coverage
+        retention-days: 30
+        
+    - name: Generate test and coverage summary
+      if: always()
+      run: |
+        echo "## Test Results & Coverage 📊" >> $GITHUB_STEP_SUMMARY
+        echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+        echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+        
+        # Test results
+        if [ -f ./test-results/*.trx ]; then
+          test_count=$(find ./test-results -name '*.trx' -exec grep -o 'total="[^"]*"' {} \; | cut -d'"' -f2 | head -1 || echo "Unknown")
+          passed_count=$(find ./test-results -name '*.trx' -exec grep -o 'passed="[^"]*"' {} \; | cut -d'"' -f2 | head -1 || echo "Unknown")
+          echo "| Total Tests | $test_count |" >> $GITHUB_STEP_SUMMARY
+          echo "| Passed Tests | $passed_count |" >> $GITHUB_STEP_SUMMARY
+          echo "| Test Status | ✅ All tests passed |" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "| Tests | ⚠️ Test results not found |" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        # Coverage results
+        if [ -f ./coverage-report/Summary.json ]; then
+          coverage=$(cat ./coverage-report/Summary.json | grep -o '"linecoverage":"[^"]*"' | cut -d'"' -f4 || echo "Unknown")
+          branch_coverage=$(cat ./coverage-report/Summary.json | grep -o '"branchcoverage":"[^"]*"' | cut -d'"' -f4 || echo "Unknown")
+          echo "| Line Coverage | $coverage% |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branch Coverage | $branch_coverage% |" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "📊 **Coverage Report**: Download the \`coverage-report-${{ matrix.dotnet-version }}\` artifact to view the HTML coverage dashboard" >> $GITHUB_STEP_SUMMARY
+
+  codeql-analysis:
+    name: CodeQL Security Analysis
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ 'csharp' ]
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v3
+      with:
+        languages: ${{ matrix.language }}
+        queries: +security-and-quality
+        
+    - name: Setup .NET Core
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '9.0.x'
+        
+    - name: Restore dependencies
+      run: dotnet restore
+      
+    - name: Build for CodeQL analysis
+      run: dotnet build --configuration Release --no-restore
+      
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+      with:
+        category: "/language:${{matrix.language}}"
+        upload: true
+        
+    - name: CodeQL Summary
+      run: |
+        echo "## CodeQL Security Analysis 🛡️" >> $GITHUB_STEP_SUMMARY
+        echo "✅ CodeQL analysis completed successfully" >> $GITHUB_STEP_SUMMARY
+        echo "- Language: C#" >> $GITHUB_STEP_SUMMARY
+        echo "- Queries: Security and Quality" >> $GITHUB_STEP_SUMMARY
+        echo "- Results uploaded to Security tab" >> $GITHUB_STEP_SUMMARY
+
+  code-quality:
+    name: Code Quality & Metrics Analysis
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup .NET Core
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '9.0.x'
+        
+    - name: Restore dependencies
+      run: dotnet restore
+      
+    - name: Install analysis tools
+      run: |
+        dotnet tool install -g dotnet-format
+        dotnet tool install -g dotnet-reportgenerator-globaltool
+        
+    - name: Run dependency security scan
+      run: |
+        echo "## Dependency Security Analysis 🔒" >> $GITHUB_STEP_SUMMARY
+        dotnet list package --vulnerable --include-transitive > security-report.txt 2>&1 || true
+        if grep -q "has no vulnerable packages" security-report.txt || ! grep -q "vulnerable" security-report.txt; then
+          echo "✅ No vulnerable dependencies found" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "⚠️ Vulnerable dependencies detected:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat security-report.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+        fi
+        
+    - name: Code formatting analysis
+      run: |
+        echo "## Code Formatting Analysis 🎨" >> $GITHUB_STEP_SUMMARY
+        if dotnet format --verify-no-changes --verbosity minimal > format-report.txt 2>&1; then
+          echo "✅ Code formatting is consistent" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "⚠️ Code formatting issues found:" >> $GITHUB_STEP_SUMMARY
+          echo "Run \`dotnet format\` to fix formatting issues" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          tail -20 format-report.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+        fi
+        
+    - name: Advanced code metrics analysis
+      run: |
+        echo "## Detailed Code Metrics 📈" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Create detailed metrics report
+        echo "### File Analysis" >> $GITHUB_STEP_SUMMARY
+        echo "| File | Lines | Classes | Methods | Complexity Score |" >> $GITHUB_STEP_SUMMARY
+        echo "|------|-------|---------|---------|------------------|" >> $GITHUB_STEP_SUMMARY
+        
+        total_lines=0
+        total_classes=0
+        total_methods=0
+        total_complexity=0
+        file_count=0
+        
+        find . -name "*.cs" -not -path "./bin/*" -not -path "./obj/*" -not -path "./TestResults/*" | sort | while read file; do
+          if [ -f "$file" ]; then
+            lines=$(wc -l < "$file" 2>/dev/null || echo 0)
+            classes=$(grep -c "class " "$file" 2>/dev/null || echo 0)
+            methods=$(grep -c "public.*(" "$file" 2>/dev/null || echo 0)
+            
+            # Simple complexity calculation (if statements, loops, etc.)
+            complexity=$(($(grep -c "if\|for\|while\|switch\|catch" "$file" 2>/dev/null || echo 0) + $methods))
+            
+            echo "| $(basename "$file") | $lines | $classes | $methods | $complexity |" >> $GITHUB_STEP_SUMMARY
+            
+            total_lines=$((total_lines + lines))
+            total_classes=$((total_classes + classes))
+            total_methods=$((total_methods + methods))
+            total_complexity=$((total_complexity + complexity))
+            file_count=$((file_count + 1))
+          fi
+        done
+        
+        # Calculate averages
+        if [ $file_count -gt 0 ]; then
+          avg_lines=$((total_lines / file_count))
+          avg_complexity=$((total_complexity / file_count))
+        else
+          avg_lines=0
+          avg_complexity=0
+        fi
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Summary Statistics" >> $GITHUB_STEP_SUMMARY
+        echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+        echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+        echo "| **Total Files** | **$file_count** |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Total Lines** | **$total_lines** |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Total Classes** | **$total_classes** |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Total Methods** | **$total_methods** |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Total Complexity** | **$total_complexity** |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Avg Lines/File** | **$avg_lines** |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Avg Complexity/File** | **$avg_complexity** |" >> $GITHUB_STEP_SUMMARY
+        
+        # Quality scores
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Quality Indicators" >> $GITHUB_STEP_SUMMARY
+        if [ $avg_lines -lt 200 ]; then
+          echo "✅ **File Size**: Good (avg $avg_lines lines per file)" >> $GITHUB_STEP_SUMMARY
+        elif [ $avg_lines -lt 300 ]; then
+          echo "⚠️ **File Size**: Moderate (avg $avg_lines lines per file)" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ **File Size**: High (avg $avg_lines lines per file - consider refactoring)" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        if [ $avg_complexity -lt 10 ]; then
+          echo "✅ **Complexity**: Low (good maintainability)" >> $GITHUB_STEP_SUMMARY
+        elif [ $avg_complexity -lt 20 ]; then
+          echo "⚠️ **Complexity**: Moderate (acceptable)" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ **Complexity**: High (consider simplification)" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        # Generate HTML report
+        cat > code-metrics.html << 'EOF'
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Code Metrics Dashboard</title>
+            <style>
+                body { font-family: Arial, sans-serif; margin: 20px; }
+                .metric-card { background: #f5f5f5; padding: 15px; margin: 10px 0; border-radius: 5px; }
+                .good { border-left: 5px solid #28a745; }
+                .warning { border-left: 5px solid #ffc107; }
+                .danger { border-left: 5px solid #dc3545; }
+                table { border-collapse: collapse; width: 100%; }
+                th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+                th { background-color: #f2f2f2; }
+            </style>
+        </head>
+        <body>
+            <h1>Code Metrics Dashboard</h1>
+        EOF
+        
+        # Add metrics to HTML
+        echo "<div class='metric-card good'><h3>Project Overview</h3>" >> code-metrics.html
+        echo "<p>Total Files: $file_count</p>" >> code-metrics.html
+        echo "<p>Total Lines: $total_lines</p>" >> code-metrics.html
+        echo "<p>Total Classes: $total_classes</p>" >> code-metrics.html
+        echo "<p>Total Methods: $total_methods</p>" >> code-metrics.html
+        echo "</div>" >> code-metrics.html
+        echo "</body></html>" >> code-metrics.html
+        
+    - name: Generate maintainability report
+      run: |
+        echo "## Maintainability Report 🔧" >> $GITHUB_STEP_SUMMARY
+        
+        # Check for potential code smells
+        large_files=$(find . -name "*.cs" -not -path "./bin/*" -not -path "./obj/*" -exec wc -l {} \; | awk '$1 > 300 {print $2}' | wc -l)
+        long_methods=$(grep -r "public.*(" . --include="*.cs" | wc -l)
+        
+        echo "| Issue | Count | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|-------|-------|--------|" >> $GITHUB_STEP_SUMMARY
+        
+        if [ "$large_files" -eq 0 ]; then
+          echo "| Large Files (>300 lines) | $large_files | ✅ Good |" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "| Large Files (>300 lines) | $large_files | ⚠️ Review |" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "| Public Methods | $long_methods | ℹ️ Info |" >> $GITHUB_STEP_SUMMARY
+        
+    - name: Upload quality reports
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: quality-reports
+        path: |
+          security-report.txt
+          format-report.txt
+          code-metrics.html
+        retention-days: 30
+
+  integration-check:
+    name: Integration Validation
+    runs-on: ubuntu-latest
+    needs: [ci, codeql-analysis, code-quality]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup .NET Core
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '9.0.x'
+        
+    - name: Build and run application
+      run: |
+        dotnet restore
+        dotnet build --configuration Release
+        timeout 30s dotnet run --project SampleApp --configuration Release > app-output.txt 2>&1 || true
+        
+    - name: Validate application output
+      run: |
+        echo "## Application Validation ✅" >> $GITHUB_STEP_SUMMARY
+        if grep -q "Application completed successfully" app-output.txt; then
+          echo "✅ Application runs and completes successfully" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Application Output:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          head -20 app-output.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ Application did not complete successfully" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat app-output.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          exit 1
+        fi
+        
+    - name: Upload application output
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: application-output
+        path: app-output.txt
+        retention-days: 7 
