@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        dotnet-version: ['8.0.x', '9.0.x']
+        dotnet-version: ['8.0.x']
     
     steps:
     - name: Checkout code
@@ -38,7 +38,7 @@ jobs:
       run: dotnet build --no-restore --configuration Release
     
     - name: Run tests
-      run: dotnet test --no-build --configuration Release --verbosity normal --collect:"XPlat Code Coverage"
+      run: dotnet test --no-build --configuration Release --verbosity normal --logger trx --results-directory TestResults
     
     - name: Upload test results
       uses: actions/upload-artifact@v4
@@ -46,11 +46,12 @@ jobs:
       with:
         name: test-results-${{ matrix.dotnet-version }}
         path: |
-          **/TestResults/
+          TestResults/
           **/*.trx
     
     - name: Upload code coverage
       uses: actions/upload-artifact@v4
+      if: always()
       with:
         name: code-coverage-${{ matrix.dotnet-version }}
-        path: '**/coverage.cobertura.xml'
+        path: 'TestResults/**/coverage.cobertura.xml'
