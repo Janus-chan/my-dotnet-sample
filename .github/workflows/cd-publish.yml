@@ -1,0 +1,70 @@
+name: CD - Publish Applications
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_run:
+    workflows: ["CI - Build and Test"]
+    types: [completed]
+    branches: [ main ]
+
+jobs:
+  publish:
+    name: Publish Multi-Platform
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'push' }}
+    
+    strategy:
+      matrix:
+        runtime: ['win-x64', 'linux-x64', 'osx-x64']
+        include:
+          - runtime: win-x64
+            artifact-name: windows
+            archive-format: zip
+          - runtime: linux-x64
+            artifact-name: linux
+            archive-format: tar.gz
+          - runtime: osx-x64
+            artifact-name: macos
+            archive-format: tar.gz
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '9.0.x'
+    
+    - name: Restore dependencies
+      run: dotnet restore
+    
+    - name: Publish ${{ matrix.runtime }}
+      run: |
+        dotnet publish SampleApp/SampleApp.csproj \
+          --configuration Release \
+          --runtime ${{ matrix.runtime }} \
+          --self-contained true \
+          --output ./publish/${{ matrix.runtime }} \
+          -p:PublishSingleFile=true \
+          -p:PublishTrimmed=true
+    
+    - name: Create archive (tar.gz)
+      if: matrix.archive-format == 'tar.gz'
+      run: |
+        cd ./publish/${{ matrix.runtime }}
+        tar -czf ../../SampleApp-${{ matrix.artifact-name }}.tar.gz *
+    
+    - name: Create archive (zip)
+      if: matrix.archive-format == 'zip'
+      run: |
+        cd ./publish/${{ matrix.runtime }}
+        zip -r ../../SampleApp-${{ matrix.artifact-name }}.zip *
+    
+    - name: Upload published application
+      uses: actions/upload-artifact@v4
+      with:
+        name: SampleApp-${{ matrix.artifact-name }}
+        path: SampleApp-${{ matrix.artifact-name }}.*
